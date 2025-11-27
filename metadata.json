@@ -1,0 +1,5 @@
+{
+  "name": "Load Analysis Chart",
+  "description": "A React application visualizing heavy load and overload data across different regions using ECharts.",
+  "requestFramePermissions": []
+}
