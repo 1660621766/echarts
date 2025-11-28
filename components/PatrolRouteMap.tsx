@@ -32,10 +32,9 @@ const COLORS = {
   worker: '#FCA555',    // orange
 };
 
-// Weather Particle Config - Tuned to match the reference image
-const PARTICLE_COUNT = 600; 
-const WIND_VECTOR = { lat: -0.00004, lng: 0.00006 }; // Strong unidirectional flow
-const BASE_SPEED = 0.2;
+// Weather Particle Config
+const PARTICLE_COUNT = 800; // Reduced slightly for better performance
+const BASE_SPEED = 0.15; 
 
 interface Particle {
   lat: number;
@@ -45,7 +44,7 @@ interface Particle {
   speed: number;
   // Store trail as Geo coordinates to prevent artifacts during map pan/zoom
   trail: { lat: number, lng: number }[]; 
-  offset: number; 
+  drift: number; // Small random variation
 }
 
 export const PatrolRouteMap: React.FC = () => {
@@ -232,13 +231,13 @@ export const PatrolRouteMap: React.FC = () => {
       
       p.age = 0;
       p.maxAge = 100 + Math.random() * 150; 
-      p.speed = BASE_SPEED + Math.random() * 0.5;
+      p.speed = BASE_SPEED + Math.random() * 0.1; 
       p.trail = [];
-      p.offset = Math.random() * 100;
+      p.drift = Math.random() * 0.2; 
     };
 
     const initParticles = () => {
-      const bounds = map.getBounds().pad(0.4); 
+      const bounds = map.getBounds().pad(0.5); 
       particles = [];
       for (let i = 0; i < PARTICLE_COUNT; i++) {
         const p = {} as Particle;
@@ -263,26 +262,57 @@ export const PatrolRouteMap: React.FC = () => {
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const bounds = map.getBounds().pad(0.4); 
+      const bounds = map.getBounds().pad(0.5); 
+      const currentZoom = map.getZoom();
+
+      // Use time to slowly shift the field
+      const time = Date.now() * 0.0005;
+
+      // Adjust scale factor to keep pixel speed consistent across zoom levels
+      // Reference zoom is 16. If we zoom in (e.g. 18), 2^(16-18) = 0.25. 
+      // Movement in degrees needs to be smaller to look the same speed on screen.
+      const zoomScale = Math.pow(2, 16 - currentZoom);
 
       // -- DRAW PARTICLES --
       ctx.lineCap = 'round';
       
       particles.forEach(p => {
         p.age++;
-        p.lat += WIND_VECTOR.lat * p.speed;
-        p.lng += WIND_VECTOR.lng * p.speed;
         
-        // Store GEO coordinates in trail, not screen coordinates
+        // --- Ocean Current Flow Field ---
+        // Scale coordinates to get reasonable frequency for noise
+        // These constants tune the "size" of the swirls
+        const scale = 300.0; 
+        const nx = (p.lng - CENTER_LNG) * scale;
+        const ny = (p.lat - CENTER_LAT) * scale;
+
+        // Base flow direction (Southeast approx -0.5 radians)
+        const baseFlow = -0.6;
+
+        // Calculate flow variation
+        const flowVariation = 
+          Math.sin(nx * 0.8 + ny * 0.5 + time) * 0.5 + 
+          Math.cos(nx * 0.4 - ny * 0.8) * 0.3;
+
+        const currentAngle = baseFlow + flowVariation;
+
+        // Move magnitude scaled by zoom to maintain visual speed
+        const moveScale = 0.0001 * p.speed * zoomScale;
+
+        // Update Position
+        p.lat += Math.sin(currentAngle) * moveScale;
+        p.lng += Math.cos(currentAngle) * moveScale;
+        
+        // Store GEO coordinates in trail
         p.trail.push({lat: p.lat, lng: p.lng});
         
-        if (p.trail.length > 10) p.trail.shift();
+        // Trail length
+        if (p.trail.length > 25) p.trail.shift();
 
         const isOutOfBounds = !bounds.contains([p.lat, p.lng]);
         
         if (p.age > p.maxAge || isOutOfBounds) {
           resetParticle(p, bounds);
-          // Initial trail point
           p.trail = [{lat: p.lat, lng: p.lng}];
         }
 
@@ -290,7 +320,6 @@ export const PatrolRouteMap: React.FC = () => {
           ctx.beginPath();
           
           // Project ALL trail points to current screen space every frame
-          // This fixes the "floating trail" artifact during pan/zoom
           const startPoint = map.latLngToContainerPoint([p.trail[0].lat, p.trail[0].lng]);
           const endPoint = map.latLngToContainerPoint([p.trail[p.trail.length - 1].lat, p.trail[p.trail.length - 1].lng]);
           
@@ -302,23 +331,22 @@ export const PatrolRouteMap: React.FC = () => {
           }
           
           // Alpha Fade
-          let alpha = 0.8;
+          let alpha = 0.6;
           const lifePercent = p.age / p.maxAge;
           
-          if (lifePercent < 0.2) alpha = lifePercent * 4;
-          else if (lifePercent > 0.8) alpha = (1 - lifePercent) * 4;
+          // Smooth fade in/out
+          if (lifePercent < 0.2) alpha = lifePercent * 3; 
+          else if (lifePercent > 0.8) alpha = (1 - lifePercent) * 3;
           
-          if (alpha < 0) alpha = 0;
-          if (alpha > 0.8) alpha = 0.8;
+          alpha = Math.max(0, Math.min(0.6, alpha));
 
           // BLUE GRADIENT for trail
-          // Gradient from Tail (transparent) to Head (visible)
           const grad = ctx.createLinearGradient(startPoint.x, startPoint.y, endPoint.x, endPoint.y);
           grad.addColorStop(0, `rgba(59, 130, 246, 0)`); // Blue transparent at tail
-          grad.addColorStop(1, `rgba(96, 165, 250, ${alpha})`); // Lighter blue at head
+          grad.addColorStop(1, `rgba(59, 130, 246, ${alpha})`); // Blue opaque at head
 
           ctx.strokeStyle = grad; 
-          ctx.lineWidth = p.speed > 1.2 ? 2.5 : 2.5; 
+          ctx.lineWidth = 1.5; 
           ctx.stroke();
         }
       });
@@ -350,9 +378,9 @@ export const PatrolRouteMap: React.FC = () => {
         <div className="mt-4 pt-2 border-t border-gray-100">
           <div className="flex items-center text-xs text-blue-600 font-medium">
              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-1">
-               <path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"></path>
+               <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14.59L8.41 12 13 7.41V16.59z"></path>
              </svg>
-             东南风 4级
+             洋流风场监测
           </div>
         </div>
       </div>
