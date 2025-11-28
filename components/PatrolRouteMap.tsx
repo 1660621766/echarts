@@ -33,7 +33,7 @@ const COLORS = {
 };
 
 // Weather Particle Config
-const PARTICLE_COUNT = 800; // Reduced slightly for better performance
+const PARTICLE_COUNT = 800; 
 const BASE_SPEED = 0.15; 
 
 interface Particle {
@@ -64,7 +64,7 @@ export const PatrolRouteMap: React.FC = () => {
     // Initialize Map
     const map = window.L.map(mapContainerRef.current, {
       center: [CENTER_LAT, CENTER_LNG],
-      zoom: 16,
+      zoom: 15,
       zoomControl: false,
       attributionControl: false
     });
@@ -187,14 +187,11 @@ export const PatrolRouteMap: React.FC = () => {
     }).addTo(map);
 
     // --- Weather Particle Effect Setup ---
-    initWeatherEffect(map);
+    const cleanupWeather = initWeatherEffect(map);
 
     // Cleanup
     return () => {
-      cancelAnimationFrame(animationFrameRef.current);
-      if (particleCanvasRef.current) {
-         particleCanvasRef.current.remove();
-      }
+      cleanupWeather();
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -216,8 +213,7 @@ export const PatrolRouteMap: React.FC = () => {
     particleCanvasRef.current = canvas;
 
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
+    
     // 2. Initialize Particles
     let particles: Particle[] = [];
     
@@ -237,18 +233,18 @@ export const PatrolRouteMap: React.FC = () => {
     };
 
     const initParticles = () => {
+      if (!ctx) return;
       const bounds = map.getBounds().pad(0.5); 
       particles = [];
       for (let i = 0; i < PARTICLE_COUNT; i++) {
         const p = {} as Particle;
         resetParticle(p, bounds);
+        // Pre-warm age so they appear naturally distributed in lifecycle
         p.age = Math.random() * p.maxAge;
         particles.push(p);
       }
     };
     
-    initParticles();
-
     // 3. Animation Loop
     const render = () => {
       if (!ctx || !canvas) return;
@@ -265,12 +261,18 @@ export const PatrolRouteMap: React.FC = () => {
       const bounds = map.getBounds().pad(0.5); 
       const currentZoom = map.getZoom();
 
+      // VISIBILITY OPTIMIZATION:
+      // Only render particles when zoomed in (zoom >= 15).
+      // Hide them when zoomed out to reduce visual clutter and improve performance on large maps.
+      if (currentZoom < 15) {
+        animationFrameRef.current = requestAnimationFrame(render);
+        return;
+      }
+
       // Use time to slowly shift the field
       const time = Date.now() * 0.0005;
 
       // Adjust scale factor to keep pixel speed consistent across zoom levels
-      // Reference zoom is 16. If we zoom in (e.g. 18), 2^(16-18) = 0.25. 
-      // Movement in degrees needs to be smaller to look the same speed on screen.
       const zoomScale = Math.pow(2, 16 - currentZoom);
 
       // -- DRAW PARTICLES --
@@ -280,23 +282,18 @@ export const PatrolRouteMap: React.FC = () => {
         p.age++;
         
         // --- Ocean Current Flow Field ---
-        // Scale coordinates to get reasonable frequency for noise
-        // These constants tune the "size" of the swirls
         const scale = 300.0; 
         const nx = (p.lng - CENTER_LNG) * scale;
         const ny = (p.lat - CENTER_LAT) * scale;
 
-        // Base flow direction (Southeast approx -0.5 radians)
         const baseFlow = -0.6;
-
-        // Calculate flow variation
         const flowVariation = 
           Math.sin(nx * 0.8 + ny * 0.5 + time) * 0.5 + 
           Math.cos(nx * 0.4 - ny * 0.8) * 0.3;
 
         const currentAngle = baseFlow + flowVariation;
 
-        // Move magnitude scaled by zoom to maintain visual speed
+        // Move magnitude scaled by zoom
         const moveScale = 0.0001 * p.speed * zoomScale;
 
         // Update Position
@@ -319,7 +316,6 @@ export const PatrolRouteMap: React.FC = () => {
         if (p.trail.length > 2) {
           ctx.beginPath();
           
-          // Project ALL trail points to current screen space every frame
           const startPoint = map.latLngToContainerPoint([p.trail[0].lat, p.trail[0].lng]);
           const endPoint = map.latLngToContainerPoint([p.trail[p.trail.length - 1].lat, p.trail[p.trail.length - 1].lng]);
           
@@ -330,20 +326,17 @@ export const PatrolRouteMap: React.FC = () => {
             ctx.lineTo(point.x, point.y);
           }
           
-          // Alpha Fade
           let alpha = 0.6;
           const lifePercent = p.age / p.maxAge;
           
-          // Smooth fade in/out
           if (lifePercent < 0.2) alpha = lifePercent * 3; 
           else if (lifePercent > 0.8) alpha = (1 - lifePercent) * 3;
           
           alpha = Math.max(0, Math.min(0.6, alpha));
 
-          // BLUE GRADIENT for trail
           const grad = ctx.createLinearGradient(startPoint.x, startPoint.y, endPoint.x, endPoint.y);
-          grad.addColorStop(0, `rgba(59, 130, 246, 0)`); // Blue transparent at tail
-          grad.addColorStop(1, `rgba(59, 130, 246, ${alpha})`); // Blue opaque at head
+          grad.addColorStop(0, `rgba(59, 130, 246, 0)`); 
+          grad.addColorStop(1, `rgba(59, 130, 246, ${alpha})`); 
 
           ctx.strokeStyle = grad; 
           ctx.lineWidth = 1.5; 
@@ -354,7 +347,36 @@ export const PatrolRouteMap: React.FC = () => {
       animationFrameRef.current = requestAnimationFrame(render);
     };
 
-    render();
+    // Zoom Handling
+    const handleZoomStart = () => {
+      // Clear particles immediately when zoom starts to prevent visual slipping/artifacts
+      cancelAnimationFrame(animationFrameRef.current);
+      if (ctx && canvas) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    };
+
+    const handleZoomEnd = () => {
+      // Re-initialize particles to fit the new zoom level/bounds perfectly
+      initParticles();
+      render();
+    };
+
+    map.on('zoomstart', handleZoomStart);
+    map.on('zoomend', handleZoomEnd);
+
+    // Initial Start
+    if (ctx) {
+        initParticles();
+        render();
+    }
+
+    return () => {
+        map.off('zoomstart', handleZoomStart);
+        map.off('zoomend', handleZoomEnd);
+        cancelAnimationFrame(animationFrameRef.current);
+        if (canvas) canvas.remove();
+    };
   };
 
   return (
@@ -380,7 +402,7 @@ export const PatrolRouteMap: React.FC = () => {
              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-1">
                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14.59L8.41 12 13 7.41V16.59z"></path>
              </svg>
-             洋流风场监测
+             洋流风场监测 <span className="text-gray-400 font-normal ml-1">(Zoom 15+)</span>
           </div>
         </div>
       </div>
